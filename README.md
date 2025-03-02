@@ -1,9 +1,6 @@
-Here's a README.md file for your project:
-
-```markdown:README.md
 # Kite Physics Simulation
 
-A 3D physics simulation of a tethered kite in wind conditions, with support for both CPU and GPU acceleration.
+A 3D physics simulation of a tethered kite in wind conditions, with support for both CPU and GPU acceleration. Written with Claude 3.5 Sonnet.
 
 ## Features
 
