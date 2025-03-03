@@ -1,17 +1,34 @@
 # Kite Physics Simulation
 
-A 3D physics simulation of a tethered kite in wind conditions, with support for both CPU and GPU acceleration. Written with Claude 3.5 Sonnet.
+A 3D physics simulation of a power-generating airborne wind energy system, with support for both CPU and GPU acceleration.
 
 ## Features
 
-- 3D visualization of kite movement
-- Real-time force visualization
-- Wind speed variation with height
-- Optional wind turbulence
-- Tether constraints using spring forces
+### Physics Model
+- **Wind Profile**: Power law wind shear model with configurable reference height and exponent
+- **Aerodynamics**: 
+  - Lift and drag forces with configurable coefficients
+  - Wind speed variation with height
+  - Optional wind turbulence
+- **Tether System**: 
+  - Option for infinite tether length (continuous unrolling)
+  - Power generation through tether unrolling
+- **Power Generation**:
+  - Based on tether tension and unroll speed
+  - Power = Tension × Unroll Speed × Efficiency
+  - Unroll speed = k × W × cos(θ)
+    - k: unroll speed factor (0-1)
+    - W: wind speed at kite height
+    - θ: angle between tether and horizontal
+  - Configurable power generation efficiency
+
+### Technical Features
+- Real-time 3D visualization
+- Force vector display
 - GPU acceleration support (using CuPy)
-- Real-time force magnitude display
+- Real-time power generation display
 - Animation export capability
+- Configurable visualization update frequency
 
 ## Requirements
 
@@ -62,7 +79,8 @@ sim = KiteSimulation(
     time_step=0.1,         # physics time step (seconds)
     
     # Kite parameters
-    height=300.0,          # initial height (meters)
+    initial_height=100.0,   # initial height (meters)
+    initial_velocity=10.0,  # initial velocity (m/s)
     kite_area=20.0,        # kite area (m²)
     kite_mass=50.0,        # mass (kg)
     lift_coefficient=1.2,   # lift coefficient
@@ -72,35 +90,71 @@ sim = KiteSimulation(
     wind_speed=27.78,      # reference wind speed (m/s)
     reference_height=10.0,  # height for reference wind speed (m)
     wind_shear_exponent=0.14, # power law exponent for wind profile
-    enable_turbulence=True,# enable wind turbulence
+    enable_turbulence=False,# enable wind turbulence
     turbulence_intensity=0.1, # turbulence intensity
     
-    # Tether parameters
-    tether_length=400.0,   # tether length (m)
-    tether_spring_constant=1000.0,  # tether stiffness (N/m)
+    # Power generation parameters
+    initial_tether_length=None,  # None for infinite tether
+    unroll_speed_factor=0.3,    # fraction of wind speed for unrolling
+    power_efficiency=0.8,       # power generation efficiency
     
     # Physics parameters
     gravity=9.81,          # gravitational acceleration (m/s²)
     max_velocity=100.0,    # maximum allowed velocity (m/s)
-    max_force=1e4,         # force clipping threshold (N)
     
     # Simulation options
-    backend='cupy',        # 'numpy' for CPU, 'cupy' for GPU
+    backend='numpy',       # 'numpy' for CPU, 'cupy' for GPU
+    visualization_update_freq=5,  # update visualization every N steps
     restrict_lateral=False # allow lateral movement
 )
 ```
 
 ## Physics Model
 
-The simulation includes:
-- Aerodynamic lift and drag forces
-- Wind speed variation with height (power law profile)
-- Optional wind turbulence
-- Tether forces using spring model
-- Gravity
-- Kinematic updates using equations:
+The simulation models:
+
+### Wind
+- Power law wind profile:
+  - W(h) = W_ref × (h/h_ref)^α
+  - W(h): Wind speed at height h
+  - W_ref: Reference wind speed
+  - h_ref: Reference height
+  - α: Wind shear exponent
+
+### Aerodynamics
+- Dynamic pressure:
+  - q = ½ρv²
+  - ρ: Air density
+  - v: Relative wind speed
+- Lift force:
+  - L = qAC_L
+  - A: Kite area
+  - C_L: Lift coefficient
+- Drag force:
+  - D = qAC_D
+  - C_D: Drag coefficient
+
+### Power Generation
+- Tension:
+  - T = F·r̂
+  - F: Total aerodynamic force
+  - r̂: Unit vector along tether
+- Unroll speed:
+  - v = kW cos(θ)
+  - k: Unroll speed factor
+  - W: Wind speed at kite height
+  - θ: Angle between tether and horizontal
+- Power:
+  - P = Tvη
+  - η: Power generation efficiency
+
+### Kinematics
+- Velocity update:
   - v = v₀ + at
+- Position update:
   - p = p₀ + v₀t + ½at²
+- Tether length update (for infinite tether):
+  - L = L₀ + vt
 
 ## Visualization
 
@@ -108,13 +162,17 @@ The simulation provides:
 - Real-time 3D visualization
 - Force vector display
 - Force magnitude in Newtons
+- Power generation in kilowatts
 - Tether visualization
 - MP4 animation export
 
 ## Dependencies
 
+Core dependencies:
 - numpy: Array operations (CPU)
-- cupy: GPU acceleration
 - matplotlib: 3D visualization
 - tqdm: Progress bar
+
+Optional dependencies:
+- cupy: GPU acceleration
 - ffmpeg: Animation export

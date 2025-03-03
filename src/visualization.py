@@ -34,6 +34,7 @@ class KiteVisualizer:
         self.tether_line = None
         self.force_arrow = None
         self.force_text = None
+        self.power_text = None
         
     def setup_plot(self, max_height, tether_length):
         """
@@ -60,13 +61,18 @@ class KiteVisualizer:
         self.force_text = self.ax.text2D(0.02, 0.95, '',                  # Force magnitude text
                                         transform=self.ax.transAxes)
         
-    def update_frame(self, position, forces):
+        # Add power text display
+        self.power_text = self.ax.text2D(0.02, 0.90, '',  # Position below force text
+                                        transform=self.ax.transAxes)
+        
+    def update_frame(self, position, forces, power=0.0):
         """
         Update the visualization for a new frame.
         
         Args:
             position (np.ndarray): Current position of the kite [x, y, z]
             forces (tuple): (total_force, lift_force, drag_force)
+            power (float): Current power generation in watts
         """
         # Update kite position marker
         self.kite_point.set_data_3d([position[0]], [position[1]], [position[2]])
@@ -76,7 +82,7 @@ class KiteVisualizer:
         
         # Update force vector visualization
         total_force = forces[0]
-        scale = 0.1  # Scale factor to make force vectors visible
+        scale = 0.01  # Reduced from 0.1 to 0.01 to make force vectors smaller
         if self.force_arrow:
             self.force_arrow.remove()
         self.force_arrow = self.ax.quiver(
@@ -88,6 +94,9 @@ class KiteVisualizer:
         # Update force magnitude text
         force_magnitude = np.linalg.norm(total_force)
         self.force_text.set_text(f'Total Force: {force_magnitude:.1f} N')
+        
+        # Update power text
+        self.power_text.set_text(f'Power Generated: {power/1000:.1f} kW')
         
         # Update display and store frame
         self.fig.canvas.draw()
@@ -108,4 +117,9 @@ class KiteVisualizer:
             frames=len(self.frames),
             interval=1000/fps
         )
-        anim.save(filename, writer='ffmpeg') 
+        anim.save(filename, writer='ffmpeg')
+
+    def update_height_limit(self, new_height):
+        """Update the height limit of the plot."""
+        self.ax.set_ylim([0, new_height])
+        self.fig.canvas.draw() 

@@ -1,6 +1,8 @@
-from typing import Literal
+from typing import Literal, Optional
 import numpy as np
 
+# Define cp as None if import fails
+cp = None
 try:
     import cupy as cp
     CUPY_AVAILABLE = True
@@ -19,20 +21,21 @@ class KitePhysics:
     """
     
     def __init__(self, 
-                 height: float = 300.0,          # meters
                  wind_speed: float = 27.78,      # m/s (100 km/h)
                  kite_area: float = 20.0,        # m²
                  air_density: float = 1.225,     # kg/m³
                  lift_coefficient: float = 1.2,   
                  drag_coefficient: float = 0.1,   
                  kite_mass: float = 50.0,        # kg
-                 tether_length: float = 400.0,   # m
-                 tether_spring_constant: float = 1000.0,  # N/m
+                 initial_tether_length: Optional[float] = 400.0,   # m, None for infinite
+                 initial_height: float = 100.0,   # m, initial height to start simulation
+                 initial_velocity: float = 10.0,  # m/s, initial velocity magnitude
+                 unroll_speed_factor: float = 0.3,  # Fraction of wind speed for unrolling
+                 power_efficiency: float = 0.8,   # Power generation efficiency
                  reference_height: float = 10.0,  # m (height for reference wind speed)
                  wind_shear_exponent: float = 0.14,  # Power law exponent for wind profile
                  gravity: float = 9.81,          # m/s²
                  max_velocity: float = 100.0,    # m/s
-                 max_force: float = 1e4,         # N
                  restrict_lateral: bool = True,
                  enable_turbulence: bool = False,
                  turbulence_intensity: float = 0.1,
@@ -41,20 +44,21 @@ class KitePhysics:
         Initialize the physics engine.
         
         Args:
-            height: Initial height of the kite
             wind_speed: Reference wind speed at reference height
             kite_area: Area of the kite for force calculations
             air_density: Air density for aerodynamic calculations
             lift_coefficient: Aerodynamic lift coefficient
             drag_coefficient: Aerodynamic drag coefficient
             kite_mass: Mass of the kite
-            tether_length: Length of the tether
-            tether_spring_constant: Spring constant for tether force calculation
+            initial_tether_length: Initial length of the tether. If None, tether is infinite
+            initial_height: Initial height to start simulation
+            initial_velocity: Initial velocity magnitude
+            unroll_speed_factor: Fraction of wind speed used for tether unrolling (0-1)
+            power_efficiency: Efficiency of power generation system (0-1)
             reference_height: Height at which wind_speed is measured
             wind_shear_exponent: Alpha value for power law wind profile
             gravity: Gravitational acceleration
             max_velocity: Maximum allowed velocity magnitude
-            max_force: Force clipping threshold
             restrict_lateral: Whether to restrict movement in z-direction
             enable_turbulence: Whether to simulate wind turbulence
             turbulence_intensity: Intensity of wind turbulence
@@ -67,18 +71,19 @@ class KitePhysics:
             backend = 'numpy'
         
         # Select computation backend
-        self.xp = cp if backend == 'cupy' else np
+        self.xp = np if backend == 'numpy' or not CUPY_AVAILABLE else cp
         
         # Convert all parameters to float32 and move to appropriate device
-        self.height = self.xp.float32(height)
         self.wind_speed = self.xp.float32(wind_speed)
         self.kite_area = self.xp.float32(kite_area)
         self.air_density = self.xp.float32(air_density)
         self.lift_coefficient = self.xp.float32(lift_coefficient)
         self.drag_coefficient = self.xp.float32(drag_coefficient)
         self.kite_mass = self.xp.float32(kite_mass)
-        self.tether_length = self.xp.float32(tether_length)
-        self.tether_spring_constant = self.xp.float32(tether_spring_constant)
+        self.infinite_tether = initial_tether_length is None
+        self.current_tether_length = self.xp.float32(initial_tether_length if initial_tether_length is not None else 1e6)
+        self.tether_unroll_speed = self.xp.float32(0.0)  # m/s
+        self.generated_power = self.xp.float32(0.0)  # Watts
         self.restrict_lateral = restrict_lateral
         self.enable_turbulence = enable_turbulence
         self.turbulence_intensity = self.xp.float32(turbulence_intensity)
@@ -86,11 +91,13 @@ class KitePhysics:
         self.wind_shear_exponent = self.xp.float32(wind_shear_exponent)
         self.gravity = self.xp.float32(gravity)
         self.max_velocity = self.xp.float32(max_velocity)
-        self.max_force = self.xp.float32(max_force)
+        self.unroll_speed_factor = self.xp.float32(unroll_speed_factor)
+        self.power_efficiency = self.xp.float32(power_efficiency)
         
-        # Initialize state vectors
-        self.position = self.xp.array([0.0, height, 0.0], dtype=self.xp.float32)
-        self.velocity = self.xp.array([0.0, 0.0, 0.0], dtype=self.xp.float32)
+        # Initialize state vectors with some initial height and velocity
+        self.position = self.xp.array([0.0, initial_height, 0.0], dtype=self.xp.float32)
+        # Give initial velocity in the x-direction to start the motion
+        self.velocity = self.xp.array([initial_velocity, 0.0, 0.0], dtype=self.xp.float32)
         
     def calculate_wind_speed(self, height):
         """Calculate wind speed at a given height using power law profile."""
@@ -103,13 +110,7 @@ class KitePhysics:
         return wind_speed
     
     def calculate_forces(self):
-        """
-        Calculate all forces acting on the kite.
-        
-        Returns:
-            tuple: (total_force, lift_force, drag_force)
-                  Forces are converted to CPU if using GPU backend
-        """
+        """Calculate all forces acting on the kite."""
         # Calculate wind speed and relative wind vector
         current_wind = self.calculate_wind_speed(self.position[1])
         relative_wind = self.xp.array([float(current_wind), 0.0, 0.0], dtype=self.xp.float32) - self.velocity
@@ -126,45 +127,78 @@ class KitePhysics:
         lift_force = dynamic_pressure * self.kite_area * self.lift_coefficient
         drag_force = dynamic_pressure * self.kite_area * self.drag_coefficient
         
-        # Calculate tether spring force
-        current_length = self.xp.linalg.norm(self.position)
-        if current_length > self.tether_length:
-            spring_force = -self.tether_spring_constant * (current_length - self.tether_length) * self.position / current_length
-        else:
-            spring_force = self.xp.zeros(3, dtype=self.xp.float32)
+        # Combine all forces (using fixed max_force value for numerical stability)
+        MAX_FORCE = 1e4  # Fixed value
+        drag_x = self.xp.clip(drag_force * wind_direction[0], -MAX_FORCE, MAX_FORCE)
+        lift_y = self.xp.clip(lift_force - self.kite_mass * self.gravity, -MAX_FORCE, MAX_FORCE)
         
-        # Combine all forces
-        drag_x = self.xp.clip(drag_force * wind_direction[0], -self.max_force, self.max_force)
-        lift_y = self.xp.clip(lift_force - self.kite_mass * self.gravity, -self.max_force, self.max_force)
+        # Convert boolean to array for CuPy compatibility
+        restrict_lateral_array = self.xp.array(self.restrict_lateral, dtype=bool)
         drag_z = self.xp.where(
-            self.xp.array(self.restrict_lateral, dtype=bool),
-            self.xp.zeros(1, dtype=self.xp.float32)[0],
-            self.xp.clip(drag_force * wind_direction[2], -self.max_force, self.max_force)
+            restrict_lateral_array,
+            self.xp.float32(0.0),
+            self.xp.clip(drag_force * wind_direction[2], -MAX_FORCE, MAX_FORCE)
         )
         
-        total_force = self.xp.stack([drag_x, lift_y, drag_z]) + spring_force
+        # Calculate total force (no need to index drag_z)
+        total_force = self.xp.array([drag_x, lift_y, drag_z], dtype=self.xp.float32)
         
-        # Convert to CPU if using GPU
-        if self.xp is cp:
-            return (cp.asnumpy(total_force), float(lift_force), float(drag_force))
+        # Calculate tension (radial component of forces)
+        position_magnitude = self.xp.linalg.norm(self.position)
+        if position_magnitude > 0:
+            # Unit vector pointing from anchor to kite
+            position_unit = self.position / position_magnitude
+            
+            # Calculate tension as projection of total aerodynamic forces onto tether direction
+            # Positive tension means the kite is pulling outward
+            tension = self.xp.dot(total_force, position_unit)
+            
+            # For infinite tether mode with positive tension:
+            if self.infinite_tether and tension > 0:
+                # Get wind speed at kite's current height using power law profile
+                wind_speed = self.calculate_wind_speed(self.position[1])
+                
+                # Calculate cosine of angle between tether and horizontal (x-axis)
+                # This represents how much of the wind's force contributes to unrolling
+                # cos_theta = x_component of unit vector (adjacent/hypotenuse)
+                cos_theta = self.xp.abs(position_unit[0])
+                
+                # Calculate unroll speed as fraction of projected wind speed
+                # - wind_speed * cos_theta: wind speed component along tether direction
+                # - unroll_speed_factor: controllable fraction (0-1) of that speed used for unrolling
+                self.tether_unroll_speed = wind_speed * cos_theta * self.unroll_speed_factor
+                
+                # Calculate power generation:
+                # P = F * v * η
+                # where:
+                # - F (tension) is the force along the tether
+                # - v (tether_unroll_speed) is the speed of unrolling
+                # - η (power_efficiency) accounts for conversion losses
+                self.generated_power = tension * self.tether_unroll_speed * self.power_efficiency
+            else:
+                # No power generation when tension is zero or negative
+                self.tether_unroll_speed = 0.0
+                self.generated_power = 0.0
+            
+            # For finite tether, prevent movement beyond length
+            if not self.infinite_tether and position_magnitude > self.current_tether_length:
+                total_force = -total_force  # Prevent further movement
+        else:
+            total_force = self.xp.zeros(3, dtype=self.xp.float32)
+            self.tether_unroll_speed = 0.0
+            self.generated_power = 0.0
+        
+        # Don't convert to CPU here - keep data on GPU
         return (total_force, float(lift_force), float(drag_force))
     
     def update_state(self, dt):
-        """
-        Update position and velocity based on forces using kinematic equations.
-        
-        Uses the equations:
-        v = v0 + a*t
-        p = p0 + v0*t + (1/2)a*t^2
-        
-        Args:
-            dt: Time step in seconds
-            
-        Returns:
-            Updated position (converted to CPU if using GPU)
-        """
+        """Update position and velocity."""
         forces = self.calculate_forces()
         total_force = self.xp.asarray(forces[0], dtype=self.xp.float32)
+        
+        # Update tether length based on unroll speed
+        if self.infinite_tether:
+            self.current_tether_length += self.tether_unroll_speed * dt
         
         # Calculate acceleration
         acceleration = total_force / self.kite_mass
@@ -182,5 +216,11 @@ class KitePhysics:
         # Update position using kinematic equation (p = p0 + v0*t + 0.5*a*t^2)
         self.position += initial_velocity * dt + 0.5 * acceleration * dt * dt
         
-        # Convert position to CPU if using GPU
-        return cp.asnumpy(self.position) if self.xp is cp else self.position 
+        # Return state without converting to CPU
+        return {
+            'position': self.position,
+            'velocity': self.velocity,
+            'force': total_force,
+            'power': self.generated_power,
+            'tether_length': self.current_tether_length
+        } 
